@@ -1,0 +1,217 @@
+     1                  ;------------ Setup Timers ------------
+     2                  ;TIMER 0 (10ms interrupt for stopwatch timekeeping)
+     3        0000      T0_G    EQU 0   ; GATE
+     4        0000      T0_C    EQU 0   ; COUNTER/-TIMER 
+     5        0001      T0_M    EQU 1   ; MODE 1 (16-bit)
+     6        0001      TIM0    EQU T0_M+T0_C*4+T0_G*8 
+     7                  
+     8                  ;TIMER 1 (50ms interrupt for 10s sound signal)
+     9        0000      T1_G    EQU 0   ; GATE 
+    10        0000      T1_C    EQU 0   ; COUNTER/-TIMER 
+    11        0001      T1_M    EQU 1   ; MODE 1 (16-bit)
+    12        0001      TIM1    EQU T1_M+T1_C*4+T1_G*8 
+    13                  
+    14        0011      TMOD_SET    EQU TIM0+TIM1*16
+    15                  
+    16                  ; 10[ms] = 10 000[uS]*(11.0592[MHz]/12) = 9 216 cycles = 36 * 256 
+    17        00DC      TH0_SET     EQU 256-36
+    18        0000      TL0_SET     EQU 0
+    19                  
+    20                  ; 50[ms] = 50 000[uS]*(11.0592[MHz]/12) = 46 080 cycles = 180 * 256
+    21        004C      TH1_SET     EQU 256-180
+    22        0000      TL1_SET     EQU 0
+    23                  ;---------------------------------------
+    24                  
+    25        0095      BUZZ    EQU P1.5 ; Define Buzzer pin (Active Low) 
+    26                  
+    27                  ; Variables in the RAM
+    28        0030      SEC_COUNT  EQU 30H ; Seconds counter (0-99)
+    29        0031      CS_COUNT   EQU 31H ; Centiseconds counter (0-99)
+    30        0032      T1_TICKS   EQU 32H ; Counter for 50ms ticks to reach 10s limit
+    31        0033      BEEP_DUR   EQU 33H ; Counter for buzzer ON duration
+    32                  
+    33  0000: 02 01 00      LJMP START
+    34                  
+    35  000B:               ORG 0BH ; Timer 0 Interrupt Vector
+    36  000B: 02 01 7D      LJMP TIMER0_ISR
+    37                  
+    38  001B:               ORG 1BH ; Timer 1 Interrupt Vector
+    39  001B: 02 01 A7      LJMP TIMER1_ISR
+    40                  
+    41  0100:               ORG 100H ; Jump to the start of the program
+    42                  
+    43  0100:           START:
+    44  0100: 12 81 08      LCALL LCD_INIT 
+    45  0103: 12 81 0C      LCALL LCD_CLR 
+    46                      
+    47                      ; Setup TMOD mode for both timers
+    48  0106: 75 89 11      MOV TMOD, #TMOD_SET
+    49                      
+    50                      ; Setup initial timer values
+    51  0109: 75 8C DC      MOV TH0, #TH0_SET
+    52  010C: 75 8A 00      MOV TL0, #TL0_SET
+    53  010F: 75 8D 4C      MOV TH1, #TH1_SET
+    54  0112: 75 8B 00      MOV TL1, #TL1_SET
+    55                      
+    56                      ; Initialize variables to 0
+    57  0115: 75 30 00      MOV SEC_COUNT, #0
+    58  0118: 75 31 00      MOV CS_COUNT, #0
+    59  011B: 75 32 00      MOV T1_TICKS, #0
+    60  011E: 75 33 00      MOV BEEP_DUR, #0
+    61                      
+    62  0121: D2 95         SETB BUZZ ; Turn off the Buzzer
+    63                      
+    64  0123: D2 AF         SETB EA  ; Global interrupt enable
+    65  0125: D2 A9         SETB ET0 ; Enable Timer 0 interrupt
+    66  0127: D2 AB         SETB ET1 ; Enable Timer 1 interrupt
+    67                      
+    68  0129: 12 01 57      LCALL DISPLAY_TIME ; Show "00,00" on the LCD
+    69                  
+    70  012C:           MAIN_LOOP:
+    71  012C: 12 81 1C      LCALL WAIT_KEY
+    72                      
+    73                      ; Check if button 'A' (10) was pressed to start/pause the stopwatch
+    74  012F: B4 0A 11      CJNE A, #10, CHECK_RESET
+    75                      
+    76                      ; Toggle the running state based on TR0 flag
+    77  0132: 30 8C 08      JNB TR0, START_TIMERS
+    78                      
+    79  0135:           STOP_TIMERS:
+    80  0135: C2 8C         CLR TR0
+    81  0137: C2 8E         CLR TR1
+    82  0139: D2 95         SETB BUZZ ; Turn off the Buzzer
+    83  013B: 80 EF         SJMP MAIN_LOOP
+    84                  
+    85  013D:           START_TIMERS:
+    86  013D: D2 8C         SETB TR0
+    87  013F: D2 8E         SETB TR1
+    88  0141: 80 E9         SJMP MAIN_LOOP
+    89                  
+    90  0143:           CHECK_RESET:
+    91                      ; Check if 'B' (value 11) was pressed to reset the stopwatch
+    92  0143: B4 0B E6      CJNE A, #11, MAIN_LOOP
+    93                      
+    94                      ; Reset all counters and update the display back to "00,00"
+    95  0146: 75 30 00      MOV SEC_COUNT, #0
+    96  0149: 75 31 00      MOV CS_COUNT, #0
+    97  014C: 75 32 00      MOV T1_TICKS, #0
+    98  014F: 75 33 00      MOV BEEP_DUR, #0
+    99  0152: 12 01 57      LCALL DISPLAY_TIME
+   100  0155: 80 D5         SJMP MAIN_LOOP
+   101                  
+   102                  ;---------------------------------------
+   103                  ; DISPLAY_TIME Subroutine
+   104                  ;---------------------------------------
+   105  0157:           DISPLAY_TIME:
+   106                      ; Command 80H sets DDRAM address to 0, moving the cursor to the first char.
+   107                      ; This avoids screen flicker which would happen if LCALL LCD_CLR was used.
+   108  0157: 74 80         MOV A, #80H 
+   109  0159: 12 81 06      LCALL WRITE_INSTR
+   110                      
+   111  015C: E5 30         MOV A, SEC_COUNT
+   112  015E: 12 01 6C      LCALL PRINT_DEC
+   113                      
+   114  0161: 74 2C         MOV A, #','
+   115  0163: 12 81 02      LCALL WRITE_DATA
+   116                      
+   117  0166: E5 31         MOV A, CS_COUNT
+   118  0168: 12 01 6C      LCALL PRINT_DEC
+   119  016B: 22            RET
+   120                  
+   121                  ;---------------------------------------
+   122                  ; PRINT_DEC Subroutine
+   123                  ; Prints a number formatted strictly to two digits (e.g. 5 -> "05")
+   124                  ;---------------------------------------
+   125  016C:           PRINT_DEC:
+   126  016C: 75 F0 0A      MOV B, #10
+   127  016F: 84            DIV AB
+   128  0170: 24 30         ADD A, #'0'
+   129  0172: 12 81 02      LCALL WRITE_DATA
+   130  0175: E5 F0         MOV A, B
+   131  0177: 24 30         ADD A, #'0'
+   132  0179: 12 81 02      LCALL WRITE_DATA
+   133  017C: 22            RET 
+   134                  
+   135                  ;---------------------------------------
+   136                  ; TIMER 0 Interrupt Service Routine (10ms tick)
+   137                  ; Handles the stopwatch time incrementing
+   138                  ;---------------------------------------
+   139  017D:           TIMER0_ISR:
+   140                      ; PUSH used registers to prevent corrupting the main program
+   141  017D: C0 E0         PUSH ACC
+   142  017F: C0 D0         PUSH PSW
+   143  0181: C0 F0         PUSH B ; Register B is utilized inside the PRINT_DEC subroutine
+   144                  
+   145                      ; Reload timer 0 values for next 10ms tick
+   146  0183: 75 8C DC      MOV TH0, #TH0_SET
+   147  0186: 75 8A 00      MOV TL0, #TL0_SET
+   148                      
+   149                      ; Increase centiseconds
+   150  0189: 05 31         INC CS_COUNT
+   151  018B: E5 31         MOV A, CS_COUNT
+   152  018D: B4 64 0D      CJNE A, #100, T0_ISR_END
+   153                      
+   154                      ; 100 Centiseconds = 1 Second
+   155  0190: 75 31 00      MOV CS_COUNT, #0
+   156  0193: 05 30         INC SEC_COUNT
+   157  0195: E5 30         MOV A, SEC_COUNT
+   158  0197: B4 64 03      CJNE A, #100, T0_ISR_END
+   159                      
+   160                      ; Roll over to 0 after 99 seconds
+   161  019A: 75 30 00      MOV SEC_COUNT, #0
+   162                  
+   163  019D:           T0_ISR_END:
+   164                      ; Safely update the LCD right from the ISR because the main loop 
+   165                      ; is in a non-blocking WAIT_KEY state.
+   166  019D: 12 01 57      LCALL DISPLAY_TIME
+   167                  
+   168  01A0: D0 F0         POP B
+   169  01A2: D0 D0         POP PSW
+   170  01A4: D0 E0         POP ACC
+   171  01A6: 32            RETI
+   172                  
+   173                  ;---------------------------------------
+   174                  ; TIMER 1 Interrupt Service Routine (50ms tick)
+   175                  ; Handles the 10-second buzzer signal without blocking execution
+   176                  ;---------------------------------------
+   177  01A7:           TIMER1_ISR:
+   178  01A7: C0 E0         PUSH ACC
+   179  01A9: C0 D0         PUSH PSW
+   180                  
+   181                      ; Reload timer 1 values for next 50ms tick
+   182  01AB: 75 8D 4C      MOV TH1, #TH1_SET
+   183  01AE: 75 8B 00      MOV TL1, #TL1_SET
+   184                      
+   185                      ; Check if the buzzer is currently sounding
+   186  01B1: E5 33         MOV A, BEEP_DUR
+   187  01B3: 60 08         JZ T1_COUNT
+   188                      
+   189                      ; Decrease the remaining beep duration
+   190  01B5: 15 33         DEC BEEP_DUR
+   191  01B7: E5 33         MOV A, BEEP_DUR
+   192  01B9: 70 02         JNZ T1_COUNT
+   193                      
+   194                      ; Beep duration has ended, turn off buzzer
+   195  01BB: D2 95         SETB BUZZ
+   196                  
+   197  01BD:           T1_COUNT:
+   198                      ; Increment the 50ms counter
+   199  01BD: 05 32         INC T1_TICKS
+   200  01BF: E5 32         MOV A, T1_TICKS
+   201  01C1: B4 C8 08      CJNE A, #200, T1_ISR_END ; 200 ticks * 50ms = 10 000ms = 10s
+   202                      
+   203                      ; 10 seconds limit reached!
+   204  01C4: 75 32 00      MOV T1_TICKS, #0
+   205  01C7: C2 95         CLR BUZZ ; Turn ON buzzer (Active Low)
+   206  01C9: 75 33 04      MOV BEEP_DUR, #4 ; Beep will last for 4 * 50ms = 200ms
+   207                  
+   208  01CC:           T1_ISR_END:
+   209  01CC: D0 D0         POP PSW
+   210  01CE: D0 E0         POP ACC
+   211  01D0: 32            RETI
+   212                  
+   213                  ;---------------------------------------
+   214                  ; Stop execution safeguard
+   215                  ;---------------------------------------
+   216  01D1:           STOP:
+   217  01D1: 80 FE         SJMP $ 
